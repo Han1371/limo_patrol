@@ -6,7 +6,7 @@ package_name = 'limo_patrol'
 
 setup(
     name=package_name,
-    version='0.0.0',
+    version='0.0.1',
     packages=[package_name],
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -19,8 +19,11 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
+
+    # TODO: 본인 정보로 수정 권장
     maintainer='your_name',
     maintainer_email='you@example.com',
+
     description='LIMO patrol (day/night + fire detection)',
     license='Apache-2.0',
     tests_require=['pytest'],
