@@ -15,90 +15,136 @@ import yaml
 
 class WaypointPatrolNode(Node):
     """
-    - config/waypoints.yaml에서 다중 waypoint를 읽어
-      Nav2 FollowWaypoints 액션으로 순찰.
-    - /fire_detected, /patrol/obstacle_detected 구독:
-      * fire_detected=True  -> Nav2 goal cancel + cmd_vel=0 정지
-      * obstacle_detected=True -> cmd_vel=0 (안전 정지)
+    - Nav2 FollowWaypoints로 waypoint 순찰
+    - /patrol/pause True: goal cancel + 정지
+    - fire_detected True: goal cancel + 정지
+    - /patrol/emergency_stop True: goal cancel + 정지 + latch(재개 불가)
+    - waypoint 1바퀴 완료 시 /patrol/cycle_done=True 발행 후 다음 바퀴 재시작
     """
 
     def __init__(self):
         super().__init__('waypoint_patrol_node')
 
-        self.declare_parameter(
-            'waypoint_file',
-            str(Path.home() / 'limo_patrol_waypoints.yaml')
-        )
-        waypoint_file = self.get_parameter('waypoint_file').get_parameter_value().string_value
+        self.declare_parameter('waypoint_file', str(Path.home() / 'limo_patrol_waypoints.yaml'))
+        self.declare_parameter('loop_patrol', True)
+        self.declare_parameter('restart_delay_sec', 1.0)
+
+        waypoint_file = self.get_parameter('waypoint_file').value
+        self.loop_patrol = bool(self.get_parameter('loop_patrol').value)
+        self.restart_delay_sec = float(self.get_parameter('restart_delay_sec').value)
 
         self.waypoints = self.load_waypoints(waypoint_file)
         if not self.waypoints:
-            self.get_logger().error('No waypoints loaded. Check waypoint_file.')
+            self.get_logger().error('No waypoints loaded.')
         else:
             self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints.')
 
-        # 상태 플래그
         self.fire_detected = False
-        self.obstacle_detected = False
+        self.paused = False
+        self.emergency_stop = False
 
-        # 화재 / 장애물 구독
-        self.create_subscription(Bool, 'fire_detected', self.fire_callback, 10)
-        self.create_subscription(Bool, '/patrol/obstacle_detected', self.obstacle_callback, 10)
-
-        # cmd_vel 퍼블리셔
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-
-        # FollowWaypoints 액션 클라이언트
-        self._client = ActionClient(self, FollowWaypoints, 'follow_waypoints')
         self._goal_handle = None
-
-        # Nav2 서버 준비되면 goal 한 번 전송
-        self.timer = self.create_timer(2.0, self.try_send_goal_once)
         self.sent = False
 
-    # ----------------------- 콜백 -----------------------
-    def fire_callback(self, msg: Bool):
-        if msg.data and not self.fire_detected:
-            self.get_logger().warn('🔥 Fire detected! Stopping patrol and canceling Nav2 goal.')
-            self.fire_detected = True
+        # publishers
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cycle_done_pub = self.create_publisher(Bool, '/patrol/cycle_done', 10)
+
+        # subscribers
+        self.create_subscription(Bool, 'fire_detected', self.fire_callback, 10)
+        self.create_subscription(Bool, '/patrol/pause', self.pause_callback, 10)
+        self.create_subscription(Bool, '/patrol/emergency_stop', self.emergency_stop_callback, 10)
+
+        # action
+        self._client = ActionClient(self, FollowWaypoints, 'follow_waypoints')
+
+        # restart timer(중복 방지)
+        self.restart_timer = None
+
+        # initial attempt
+        self.init_timer = self.create_timer(2.0, self.try_send_goal_once)
+
+    # ---------------- callbacks ----------------
+    def emergency_stop_callback(self, msg: Bool):
+        if msg.data and not self.emergency_stop:
+            self.emergency_stop = True
+            self.get_logger().error('🛑 EMERGENCY STOP! Canceling goal and stopping permanently.')
             self.stop_robot()
             self.cancel_nav_goal()
-            # TODO: 텔레그램 알림 연동
-        elif not msg.data and self.fire_detected:
-            self.get_logger().info('Fire cleared.')
-            self.fire_detected = False
+            self.sent = True
+        elif (not msg.data) and self.emergency_stop:
+            self.get_logger().warn('Emergency stop is latched. Ignore stop=False.')
 
-    def obstacle_callback(self, msg: Bool):
-        if msg.data and not self.obstacle_detected:
-            self.get_logger().warn('Obstacle detected. Stopping robot (safety brake).')
-            self.obstacle_detected = True
+    def fire_callback(self, msg: Bool):
+        if msg.data and not self.fire_detected:
+            self.fire_detected = True
+            self.get_logger().warn('🔥 Fire detected! Canceling goal and stopping.')
             self.stop_robot()
-        elif not msg.data and self.obstacle_detected:
-            self.get_logger().info('Obstacle cleared.')
-            self.obstacle_detected = False
+            self.cancel_nav_goal()
+        elif (not msg.data) and self.fire_detected:
+            self.fire_detected = False
+            self.get_logger().info('Fire cleared.')
+            self.maybe_resume('fire_cleared')
 
-    # -------------------- 유틸 함수 ---------------------
+    def pause_callback(self, msg: Bool):
+        if msg.data and not self.paused:
+            self.paused = True
+            self.get_logger().warn('Patrol PAUSE received. Canceling goal and stopping.')
+            self.stop_robot()
+            self.cancel_nav_goal()
+        elif (not msg.data) and self.paused:
+            self.paused = False
+            self.get_logger().info('Patrol RESUME received.')
+            self.maybe_resume('pause_cleared')
+
+    # ---------------- helpers ----------------
+    def can_move(self) -> bool:
+        return (not self.emergency_stop) and (not self.fire_detected) and (not self.paused)
+
     def stop_robot(self):
-        twist = Twist()
-        twist.linear.x = 0.0
-        twist.angular.z = 0.0
-        self.cmd_pub.publish(twist)
+        t = Twist()
+        t.linear.x = 0.0
+        t.angular.z = 0.0
+        self.cmd_pub.publish(t)
 
     def cancel_nav_goal(self):
         if self._goal_handle is None:
-            self.get_logger().warn('No active FollowWaypoints goal to cancel.')
             return
-        future = self._goal_handle.cancel_goal_async()
-        future.add_done_callback(self._cancel_done_callback)
+        try:
+            self._goal_handle.cancel_goal_async()
+        except Exception:
+            pass
 
-    def _cancel_done_callback(self, future):
-        cancel_response = future.result()
-        if len(cancel_response.goals_canceling) > 0:
-            self.get_logger().info('FollowWaypoints goal successfully canceled.')
-        else:
-            self.get_logger().warn('FollowWaypoints goal cancel not accepted.')
+    def schedule_restart(self):
+        if self.restart_timer is not None:
+            try:
+                self.restart_timer.cancel()
+            except Exception:
+                pass
+            self.restart_timer = None
+        self.restart_timer = self.create_timer(self.restart_delay_sec, self._restart_once)
 
-    # ----------------- Waypoint 로드 --------------------
+    def _restart_once(self):
+        if self.restart_timer is not None:
+            try:
+                self.restart_timer.cancel()
+            except Exception:
+                pass
+            self.restart_timer = None
+        self.try_send_goal_once()
+
+    def maybe_resume(self, reason: str):
+        if not self.loop_patrol:
+            return
+        if not self.can_move():
+            return
+        if self._goal_handle is not None:
+            return
+        self.get_logger().info(f'Restarting patrol due to {reason}')
+        self.sent = False
+        self.schedule_restart()
+
+    # ---------------- waypoint load ----------------
     def load_waypoints(self, path):
         try:
             with open(path, 'r') as f:
@@ -120,47 +166,57 @@ class WaypointPatrolNode(Node):
             waypoints.append(pose)
         return waypoints
 
-    # ----------------- Nav2 Goal 전송 -------------------
+    # ---------------- goal send ----------------
     def try_send_goal_once(self):
         if self.sent:
+            return
+        if not self.can_move():
             return
         if not self._client.wait_for_server(timeout_sec=0.5):
             self.get_logger().info('Waiting for FollowWaypoints action server...')
             return
-
         if not self.waypoints:
             self.get_logger().error('No waypoints to send.')
-            self.timer.cancel()
             return
 
         goal_msg = FollowWaypoints.Goal()
         goal_msg.poses = self.waypoints
 
         self.get_logger().info(f'Sending {len(self.waypoints)} waypoints to Nav2.')
+        fut = self._client.send_goal_async(goal_msg)
+        fut.add_done_callback(self.goal_response_callback)
 
-        send_future = self._client.send_goal_async(goal_msg)
-        send_future.add_done_callback(self.goal_response_callback)
         self.sent = True
-        self.timer.cancel()
 
     def goal_response_callback(self, future):
-        goal_handle = future.result()
-        if not goal_handle.accepted:
-            self.get_logger().error('FollowWaypoints goal rejected.')
+        gh = future.result()
+        if not gh.accepted:
+            self.get_logger().error('Goal rejected.')
+            self.sent = False
+            self.schedule_restart()
             return
 
-        self.get_logger().info('FollowWaypoints goal accepted.')
-        self._goal_handle = goal_handle
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self.result_callback)
+        self.get_logger().info('Goal accepted.')
+        self._goal_handle = gh
+        res_fut = gh.get_result_async()
+        res_fut.add_done_callback(self.result_callback)
 
     def result_callback(self, future):
-        result = future.result().result
+        res = future.result().result
         self.get_logger().info(
-            f'FollowWaypoints finished. '
-            f'failed_waypoints={result.failed_waypoints}, failed_ids={result.failed_ids}'
+            f'FollowWaypoints finished. failed_waypoints={res.failed_waypoints}, failed_ids={res.failed_ids}'
         )
         self._goal_handle = None
+
+        # cycle_done trigger
+        self.cycle_done_pub.publish(Bool(data=True))
+        self.get_logger().info('Published /patrol/cycle_done=True')
+
+        # loop
+        if self.loop_patrol and self.can_move():
+            self.get_logger().info('Loop patrol -> restarting.')
+            self.sent = False
+            self.schedule_restart()
 
 
 def main(args=None):
