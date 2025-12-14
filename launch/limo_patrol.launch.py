@@ -4,19 +4,18 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     mode_manager = Node(
-        package='limo_patrol',
-        executable='mode_manager_node',
-        name='mode_manager_node',
-        output='screen',
-        parameters=[{
-            'mode_source': 'auto',                 # 'manual' or 'auto'
-            'initial_mode': 'NIGHT',
-            'brightness_topic': '/camera/image_raw',
-            'brightness_threshold': 50.0,
-            'publish_once': True,                  # ✅ 주행 시작 전 1회 결정/발행
-            'wait_first_image_timeout_sec': 5.0,
-        }]
-    )
+    package='limo_patrol',
+    executable='mode_manager_node',
+    name='mode_manager_node',
+    output='screen',
+    parameters=[
+        {'mode_source': 'auto'},
+        {'initial_mode': 'NIGHT'},
+        {'brightness_topic': '/camera/color/image_raw'},  # <- 이걸로 쓰는 걸 추천
+        {'brightness_threshold': 50.0},
+    ],
+)
+
 
     object_perception = Node(
         package='limo_patrol',
