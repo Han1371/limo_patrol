@@ -1,29 +1,29 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>limo_patrol</name>
-  <version>0.0.1</version>
-  <description>LIMO patrol (day/night + fire detection)</description>
+  <version>0.1.0</version>
+  <description>LIMO patrol: LiDAR obstacle detection + one-shot day/night mode manager</description>
 
-  <!-- TODO: 본인 정보로 수정 권장 -->
-  <maintainer email="you@example.com">your_name</maintainer>
+  <maintainer email="wego@example.com">wego</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
 
-  <!-- ROS2 Python + 메시지 -->
+  <!-- ROS2 Python -->
   <exec_depend>rclpy</exec_depend>
+
+  <!-- Messages -->
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>vision_msgs</exec_depend>
-  <exec_depend>nav2_msgs</exec_depend>
 
-  <!-- cv_bridge (ROS Image <-> OpenCV) -->
+  <!-- CV Bridge -->
   <exec_depend>cv_bridge</exec_depend>
 
-  <!-- Python runtime deps used in your nodes -->
-  <exec_depend>python3-requests</exec_depend>
+  <!-- System python deps (apt) -->
+  <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-requests</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
